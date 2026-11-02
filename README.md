@@ -38,7 +38,27 @@ gradlew assembleDebug
 
 The APK ends up in `app/build/outputs/apk/debug/`. To install it on a phone you'll have to allow installs from unknown sources.
 
-Min Android version is 8.0 (API 26). There are some unit tests for the parsing code that you can run with `gradlew testDebugUnitTest`.
+Min Android version is 8.0 (API 26), and it targets API 37. There are some unit tests for the parsing code that you can run with `gradlew testDebugUnitTest`.
+
+### What's not in the repo
+
+A few things are deliberately left out (see `.gitignore`) because your machine makes its own:
+
+- `local.properties`: has the path to your Android SDK. Android Studio creates it when you open the project. If you build from the command line only, create it yourself with a line like `sdk.dir=C\:\\Users\\you\\AppData\\Local\\Android\\Sdk`, or set `ANDROID_HOME`
+- `.gradle/`, `build/`, `.kotlin/` and `.idea/`: caches, build output and IDE settings, all regenerated for you
+- APKs and signing keys: you build your own. Debug builds are signed automatically, and a release build would need your own keystore
+
+What is in the repo is the Gradle wrapper (`gradlew`, `gradlew.bat`, `gradle/wrapper/`). It downloads Gradle 9.8.2 the first time, so you don't need to install Gradle yourself. You do need internet on the first build.
+
+### JDK gotcha
+
+Gradle itself wants JDK 25. `gradle/gradle-daemon-jvm.properties` (written by Android Studio) pins that, and Gradle will try to download a matching JDK automatically if you don't have one. Usually that just works, but it can cause trouble:
+
+- If you're offline or behind a proxy, the download fails and the build stops with a toolchain error
+- If Gradle can't find a suitable JDK and can't download one, install JDK 25 yourself, or delete that properties file and let Gradle use whatever JDK you have
+- If you build from a terminal, make sure `JAVA_HOME` points to a JDK that Gradle can use. Android Studio ships its own (the `jbr` folder in its install directory), which works fine
+
+The app code itself compiles to Java 11 bytecode, so the JDK version only matters for running Gradle, not for the phone.
 
 ## Things to know
 
