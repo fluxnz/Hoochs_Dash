@@ -98,6 +98,12 @@ class MainActivity : Activity() {
     private var settingsReturnsToDashboard = false
     private var metricsList: LinearLayout? = null
     private var metricsCounter: TextView? = null
+    private var supportedPids: Set<Int>? = null
+    private val probeValues = mutableMapOf<String, String>()
+    private val probeViews = mutableMapOf<String, TextView>()
+    private val probeBusy = AtomicBoolean(false)
+    private var probeStatus: TextView? = null
+    private var probeButton: MaterialButton? = null
 
     private val COLOR_BACKGROUND get() = if (darkMode) Color.rgb(10, 15, 22) else Color.rgb(243, 246, 249)
     private val COLOR_PANEL get() = if (darkMode) Color.rgb(21, 30, 41) else Color.WHITE
@@ -433,6 +439,8 @@ class MainActivity : Activity() {
         vehicleState = VehicleState.UNKNOWN
         vin = null
         vinAttempts = 0
+        supportedPids = null
+        probeValues.clear()
         if (screen == Screen.STARTUP || screen == Screen.PICKER) {
             status.text = "Connecting to ${device.displayName().substringBefore('\n')}..."
         }
@@ -1134,12 +1142,128 @@ class MainActivity : Activity() {
         addActionButton(root, "Faults  ›", primary = false) { showFaultsScreen() }
         addActionButton(root, "Protocol, test & scan  ›", primary = false) { showProtocolScreen() }
         addText(root, "DASHBOARD VALUES", 12f, COLOR_MUTED, bold = true, top = 8, bottom = 6)
-        metricsCounter = addText(root, "", 14f, COLOR_MUTED, bottom = 12)
+        metricsCounter = addText(root, "", 14f, COLOR_MUTED, bottom = 8)
+        probeStatus = addText(root, "", 13f, COLOR_MUTED, bottom = 8)
+        probeButton = addActionButton(root, "Check what my car supports", primary = false) { probeSupport() }
         metricsList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         root.addView(metricsList)
         buildMetricCards()
         addActionButton(root, "Done", primary = true) { leaveSettings() }
         showScreen()
+        if (supportedPids == null && adapterState == AdapterState.CONNECTED) probeSupport() else showProbeStatus()
+    }
+
+    private fun showProbeStatus(message: String? = null) {
+        val supported = supportedPids
+        probeStatus?.text = message ?: when {
+            adapterState != AdapterState.CONNECTED -> "Connect to the car to see which values it supports."
+            supported == null -> "Tap the button below to see which values your car supports."
+            else -> "Green values are supported, with a live reading taken just now."
+        }
+        probeButton?.isEnabled = !probeBusy.get()
+    }
+
+    // Asks the ECU which PIDs it supports (a few quick commands), then reads each supported one once.
+    // It runs only while this screen is open, so the dashboard stays fast.
+    private fun probeSupport() {
+        if (adapterState != AdapterState.CONNECTED) {
+            showProbeStatus()
+            return
+        }
+        if (!probeBusy.compareAndSet(false, true)) return
+        probeValues.clear()
+        supportedPids = null
+        buildMetricCards()
+        showProbeStatus("Asking the car what it supports...")
+        thread(name = "obd-probe") {
+            try {
+                link.exclusive {
+                    link.clearAbort()
+                    val found = mutableSetOf<Int>()
+                    var base = 0
+                    while (base <= 0xA0 && screen == Screen.SETTINGS) {
+                        val reply = try {
+                            link.send(String.format("01%02X", base), VIN_TIMEOUT_MS)
+                        } catch (_: ObdLink.TimeoutException) {
+                            ""
+                        }
+                        val block = ObdDiagnostics.supportedPids(reply, base) ?: break
+                        found.addAll(block)
+                        if ((base + 0x20) !in block) break
+                        base += 0x20
+                    }
+                    if (found.isEmpty()) {
+                        runOnUiThread { showProbeStatus("The car didn't report a list of supported values.") }
+                        return@exclusive
+                    }
+                    runOnUiThread {
+                        supportedPids = found
+                        buildMetricCards()
+                        showProbeStatus("Reading the supported values...")
+                    }
+                    for (metric in ObdMetrics.ALL) {
+                        if (screen != Screen.SETTINGS) break
+                        val text = readOnce(metric, found) ?: continue
+                        runOnUiThread {
+                            probeValues[metric.id] = text
+                            probeViews[metric.id]?.let { styleProbe(it, metric) }
+                        }
+                    }
+                    runOnUiThread { showProbeStatus() }
+                }
+            } catch (_: ObdLink.AbortedException) {
+                // Cancelled by a screen change.
+            } catch (error: IOException) {
+                runOnUiThread { markAdapterLost("Bluetooth link lost: ${error.message ?: "unknown error"}") }
+            } finally {
+                link.clearAbort()
+                probeBusy.set(false)
+                runOnUiThread { if (screen == Screen.SETTINGS) showProbeStatus() }
+            }
+        }
+    }
+
+    // Called with the command lock held.
+    private fun readOnce(metric: ObdMetric, supported: Set<Int>): String? {
+        if (metric.isAdapterVoltage) {
+            val volts = ObdParser.voltage(link.send("ATRV", ADAPTER_TIMEOUT_MS))
+            return metric.format(volts)?.let { "$it ${metric.unit}".trim() }
+        }
+        if (metric.id.substring(2).toInt(16) !in supported) return null
+        val reply = try {
+            link.send(metric.id, VIN_TIMEOUT_MS)
+        } catch (_: ObdLink.TimeoutException) {
+            return "supported"
+        }
+        return metric.format(metric.decode(reply))?.let { "$it ${metric.unit}".trim() } ?: "supported"
+    }
+
+    private fun isSupported(metric: ObdMetric): Boolean? {
+        if (metric.isAdapterVoltage) return true
+        val supported = supportedPids ?: return null
+        return metric.id.substring(2).toInt(16) in supported
+    }
+
+    private fun styleProbe(view: TextView, metric: ObdMetric) {
+        val live = probeValues[metric.id]
+        when {
+            supportedPids == null && !metric.isAdapterVoltage -> view.visibility = View.GONE
+            live != null -> {
+                view.visibility = View.VISIBLE
+                view.text = if (live == "supported") "Supported" else "Live: $live"
+                view.setTextColor(COLOR_SUCCESS)
+            }
+            isSupported(metric) == true -> {
+                view.visibility = View.VISIBLE
+                view.text = "Supported"
+                view.setTextColor(COLOR_SUCCESS)
+            }
+            else -> {
+                view.visibility = View.VISIBLE
+                view.text = "Not supported by this car"
+                view.setTextColor(COLOR_MUTED)
+            }
+        }
     }
 
     private fun showGaugeScreen() {
@@ -1490,10 +1614,10 @@ class MainActivity : Activity() {
     private fun buildMetricCards() {
         val container = metricsList ?: return
         container.removeAllViews()
+        probeViews.clear()
         val chosen = selectedMetrics
         metricsCounter?.text =
-            "${chosen.size} of ${ObdMetrics.MAX_SELECTED} selected. Tap to add or remove. " +
-                "Values a car doesn't support show as —."
+            "${chosen.size} of ${ObdMetrics.MAX_SELECTED} selected. Tap to add or remove."
         for (metric in ObdMetrics.ALL) {
             val position = chosen.indexOfFirst { it.id == metric.id }
             val selected = position >= 0
@@ -1510,6 +1634,8 @@ class MainActivity : Activity() {
             )
             val detail = if (metric.isAdapterVoltage) "Read from the adapter" else "PID ${metric.id}"
             addText(content, if (metric.unit.isEmpty()) detail else "$detail  ·  ${metric.unit}", 12f, COLOR_MUTED, top = 2)
+            probeViews[metric.id] = addText(content, "", 13f, COLOR_MUTED, bold = true, top = 4)
+                .also { styleProbe(it, metric) }
             val card = MaterialCardView(this).apply {
                 radius = dp(16).toFloat()
                 cardElevation = dp(1).toFloat()

@@ -108,6 +108,14 @@ object ObdDiagnostics {
         return MonitorStatus(a and 0x80 != 0, a and 0x7F, monitors)
     }
 
+    /** Mode 01 supported-PID bitmap reply for the block starting at [base] (0x00, 0x20, ...). */
+    fun supportedPids(reply: String, base: Int): Set<Int>? {
+        val bytes = ObdParser.hexBytesAfter(reply, String.format("41%02X", base)) ?: return null
+        if (bytes.size < 4) return null
+        val mask = bytes.take(4).fold(0L) { acc, b -> (acc shl 8) or b.toLong() }
+        return (0 until 32).filter { mask shr (31 - it) and 1L != 0L }.map { base + it + 1 }.toSet()
+    }
+
     /** Mode 09 PID 02. Handles both CAN (multi-frame) and older per-line replies. */
     fun parseVin(reply: String): String? {
         val chars = StringBuilder()

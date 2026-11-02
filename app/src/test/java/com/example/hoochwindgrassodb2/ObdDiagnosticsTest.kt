@@ -62,6 +62,18 @@ class ObdDiagnosticsTest {
     }
 
     @Test
+    fun decodesSupportedPidBitmap() {
+        // BE1FA813: PIDs 01,03,04,05,06,07,0C,0D,0E,0F,10,11,13,15,1F,20
+        val supported = ObdDiagnostics.supportedPids("41 00 BE 1F A8 13\r", 0x00)!!
+        assertTrue(0x0C in supported && 0x0D in supported && 0x05 in supported)
+        assertTrue(0x02 !in supported && 0x08 !in supported)
+        assertTrue(0x20 in supported)
+        val next = ObdDiagnostics.supportedPids("41 20 80 00 00 01\r", 0x20)!!
+        assertEquals(setOf(0x21, 0x40), next)
+        assertNull(ObdDiagnostics.supportedPids("NO DATA\r", 0x00))
+    }
+
+    @Test
     fun parsesVinFromCanAndLegacyReplies() {
         val can = "014\r0: 49 02 01 57 50 30\r1: 5A 5A 5A 39 39 5A 54\r2: 53 33 39 32 31 32 34\r"
         assertEquals("WP0ZZZ99ZTS392124", ObdDiagnostics.parseVin(can))
